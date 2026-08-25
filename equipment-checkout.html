@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no" />
+<title>ADV Media — Equipment Checkout</title>
+
+<!--
+  ============================================================================
+  EQUIPMENT CHECKOUT PORTAL — setup notes
+  ============================================================================
+  This is a KIOSK page. It's meant to live on an iPad that stays in the booth,
+  always open. There's deliberately no login: crew walk up, tap their name,
+  tap what they're taking, done. Anything requiring a password would just get
+  skipped at 4pm on a game day.
+
+  Everything writes to the same Firebase project as ADV Media Teams, so the
+  admin side of that app shows what's out and who has it.
+
+  TWO THINGS TO DO BEFORE THIS WORKS:
+
+  1. Add these to your Realtime Database rules (Build > Realtime Database >
+     Rules). The kiosk has no login, so these paths are open the same way
+     clock/checklists already are:
+
+       "equipmentInventory": { ".read": true, ".write": true },
+       "equipmentCheckouts": { ".read": true, ".write": true },
+       "equipmentRequests": { ".read": true, ".write": true },
+       "equipmentLog": { ".read": true, ".write": true },
+
+     Also change "publicProfiles" so the kiosk can list crew names. Right now
+     each profile is readable individually but the list itself isn't. Change:
+
+       "publicProfiles": {
+         "$uid": { ".read": true, ".write": "auth != null && auth.uid === $uid" }
+       }
+
+     to:
+
+       "publicProfiles": {
+         ".read": true,
+         "$uid": { ".write": "auth != null && auth.uid === $uid" }
+       }
+
+     publicProfiles only holds name, handle, skills, and photo — it was built
+     as the non-sensitive copy for exactly this kind of use. Phone numbers and
+     emergency contacts live in "profiles", which stays locked down.
+
+  2. Edit INVENTORY below to match what's actually in each booth. What's there
+     now is a reasonable starting point, not your real gear list.
+  ============================================================================
+-->
+
+<script>
+  const FIREBASE_CONFIG = {
+    apiKey: "AIzaSyDOf3aLq2gFJSr3ThRgeFLFu-VYc49ihW4",
+    authDomain: "crowley-football.firebaseapp.com",
+    databaseURL: "https://crowley-football-default-rtdb.firebaseio.com",
+    projectId: "crowley-football",
+    storageBucket: "crowley-football.firebasestorage.app",
+    messagingSenderId: "56102489603",
+    appId: "1:56102489603:web:1a81953b6dd0d2fb84c836",
+  };
+</script>
+
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+
+<style>
+  :root {
+    --bg: #0A0D12;
+    --panel: #12181F;
+    --panel2: #1A222B;
+    --border: #26313D;
+    --text: #EDEFF3;
+    --text-muted: #8A96A3;
+    --text-faint: #5C6774;
+    --green: #33A870;
+    --amber: #E0A63C;
+    --red: #D65A4E;
+    --blue: #4A8FC0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 22px 18px 80px; }
+  h1 { font-family: Georgia, "Times New Roman", serif; font-size: 26px; margin: 0 0 2px; letter-spacing: -0.3px; }
+  .subhead { color: var(--text-muted); font-size: 13.5px; margin: 2px 0 18px; }
+
+    flex: 1; padding: 13px 0; border-radius: 9px; border: none; cursor: pointer;
+    background: transparent; color: var(--text-muted); font-weight: 800; font-size: 15px;
+  }
+
+  .who-bar {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px 16px; margin-bottom: 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  .who-label { font-size: 12px; font-weight: 800; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.5px; }
+  .who-name { font-size: 17px; font-weight: 800; flex: 1; min-width: 140px; }
+  .who-none { color: var(--amber); }
+
+  .btn {
+    padding: 11px 18px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--panel2); color: var(--text); font-weight: 700; font-size: 14px; cursor: pointer;
+  }
+  .btn-primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+  .btn-lg { padding: 15px 24px; font-size: 16px; }
+  .btn:disabled { opacity: 0.5; }
+
+  .section-label {
+    font-size: 11.5px; font-weight: 800; color: var(--text-faint); text-transform: uppercase;
+    letter-spacing: 0.6px; margin: 22px 0 10px;
+  }
+
+  .gear-head { display: flex; align-items: center; gap: 12px; margin: 24px 0 10px; }
+  .gear-img {
+    width: 52px; height: 52px; flex: 0 0 52px; border-radius: 10px;
+    background: var(--panel); border: 1px solid var(--border); padding: 4px;
+  }
+  .gear-title { font-size: 15.5px; font-weight: 800; }
+  .gear-sub { font-size: 12.5px; color: var(--text-muted); margin-top: 2px; }
+
+  .card-img {
+    display: block; width: 46px; height: 46px; margin: 0 auto 8px;
+    opacity: 0.9;
+  }
+  .item-card.out .card-img { opacity: 0.5; }
+  .item-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
+  .item-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px; cursor: pointer; text-align: left; color: var(--text); position: relative;
+  }
+  .item-card.out { border-color: var(--amber); background: #1F1810; cursor: default; }
+  .item-card.mine { border-color: var(--green); background: #10201A; }
+  .item-name { font-weight: 800; font-size: 14.5px; margin-bottom: 4px; }
+  .item-meta { font-size: 12px; color: var(--text-muted); line-height: 1.45; }
+  .item-status { font-size: 11.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.4px; margin-top: 8px; }
+  .status-in { color: var(--green); }
+  .status-out { color: var(--amber); }
+  .status-mine { color: var(--green); }
+
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.72); display: flex;
+    align-items: center; justify-content: center; padding: 20px; z-index: 100;
+  }
+  .modal-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 16px;
+    padding: 22px; width: 100%; max-width: 460px; max-height: 84vh; overflow-y: auto;
+  }
+  .modal-title { font-size: 18px; font-weight: 800; margin-bottom: 4px; }
+  .modal-sub { font-size: 13px; color: var(--text-muted); margin-bottom: 16px; }
+
+  input, select {
+    width: 100%; padding: 13px 14px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--panel2); color: var(--text); font-size: 15px; font-family: inherit;
+  }
+  .name-pick {
+    display: block; width: 100%; text-align: left; padding: 13px 14px; margin-bottom: 7px;
+    border-radius: 10px; border: 1px solid var(--border); background: var(--panel2);
+    color: var(--text); font-size: 15px; cursor: pointer;
+  }
+  .footnote { color: var(--text-faint); font-size: 12.5px; line-height: 1.5; }
+  .error-msg { background: #2A1512; border: 1px solid var(--red); color: #F2B8B1; border-radius: 10px; padding: 11px 13px; font-size: 13px; margin-top: 10px; }
+  .toast {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+    background: var(--green); color: #06170F; font-weight: 800; font-size: 14.5px;
+    padding: 13px 22px; border-radius: 12px; z-index: 200; max-width: 90%;
+  }
+  .toast.warn { background: var(--amber); color: #241905; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Audio Booth — Equipment Checkout</h1>
+  <p class="subhead">Tap your name, then tap what you're taking or bringing back. Everything that leaves the booth gets checked out.</p>
+
+  <div class="who-bar">
+    <span class="who-label">You are</span>
+    <span class="who-name" id="whoName">—</span>
+    <button class="btn" id="whoBtn">Change</button>
+  </div>
+
+  <div id="root"><div class="footnote">Connecting…</div></div>
+</div>
+
+<script>
+const GEAR_IMG = {
+  handheld: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIiB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjOEZDNkYwIiBzdHJva2Utd2lkdGg9IjMiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+CjxjaXJjbGUgY3g9IjUwIiBjeT0iMjYiIHI9IjE0Ii8+CjxwYXRoIGQ9Ik01MCA0MCBMNTAgNDYiLz4KPHJlY3QgeD0iNDIiIHk9IjQ2IiB3aWR0aD0iMTYiIGhlaWdodD0iNDAiIHJ4PSI0Ii8+CjxwYXRoIGQ9Ik00NiA1NiBoOCBNNDYgNjQgaDgiLz4KPC9zdmc+",
+  beltpack: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIiB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjOEZDNkYwIiBzdHJva2Utd2lkdGg9IjMiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+CjxyZWN0IHg9IjMwIiB5PSIyMiIgd2lkdGg9IjQwIiBoZWlnaHQ9IjU2IiByeD0iNiIvPgo8cGF0aCBkPSJNNjIgMjIgTDYyIDEwIi8+CjxjaXJjbGUgY3g9IjUwIiBjeT0iNDAiIHI9IjciLz4KPHBhdGggZD0iTTQwIDU4IGgyMCBNNDAgNjYgaDIwIi8+CjxwYXRoIGQ9Ik0zMCAzNCBMMjIgMzQgTDIyIDYyIEwzMCA2MiIvPgo8L3N2Zz4=",
+  headset: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIiB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjOEZDNkYwIiBzdHJva2Utd2lkdGg9IjMiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+CjxwYXRoIGQ9Ik0yNCA1NiBWNDYgYTI2IDI2IDAgMCAxIDUyIDAgVjU2Ii8+CjxyZWN0IHg9IjE2IiB5PSI1NCIgd2lkdGg9IjE2IiBoZWlnaHQ9IjIyIiByeD0iNSIvPgo8cmVjdCB4PSI2OCIgeT0iNTQiIHdpZHRoPSIxNiIgaGVpZ2h0PSIyMiIgcng9IjUiLz4KPHBhdGggZD0iTTMyIDcwIHExNCAxNiAyNiAxMCIvPgo8Y2lyY2xlIGN4PSI2MCIgY3k9IjgyIiByPSI0Ii8+Cjwvc3ZnPg==",
+  battery: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIiB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjOEZDNkYwIiBzdHJva2Utd2lkdGg9IjMiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+CjxyZWN0IHg9IjMwIiB5PSIxOCIgd2lkdGg9IjQwIiBoZWlnaHQ9IjY0IiByeD0iNiIvPgo8cGF0aCBkPSJNNDIgMTggVjEyIGgxNiB2NiIvPgo8cGF0aCBkPSJNNTAgMzQgTDQ0IDUyIGgxMiBMNTAgNzAiLz4KPC9zdmc+",
+  refpack: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIiB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjOEZDNkYwIiBzdHJva2Utd2lkdGg9IjMiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+CjxyZWN0IHg9IjI2IiB5PSIzMCIgd2lkdGg9IjM0IiBoZWlnaHQ9IjQ4IiByeD0iNSIvPgo8cGF0aCBkPSJNNTIgMzAgVjE2Ii8+CjxjaXJjbGUgY3g9IjQzIiBjeT0iNDYiIHI9IjUiLz4KPHBhdGggZD0iTTM0IDYyIGgxOCIvPgo8cGF0aCBkPSJNNjYgMzQgcTE0IDEwIDggMjYiLz4KPGNpcmNsZSBjeD0iNzIiIGN5PSI2NiIgcj0iNCIvPgo8L3N2Zz4=",
+  console: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIiB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjOEZDNkYwIiBzdHJva2Utd2lkdGg9IjMiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+CjxyZWN0IHg9IjEyIiB5PSIyNCIgd2lkdGg9Ijc2IiBoZWlnaHQ9IjU2IiByeD0iNiIvPgo8cGF0aCBkPSJNMjYgMzggdjI4IE00MCAzOCB2MjggTTU0IDM4IHYyOCBNNjggMzggdjI4Ii8+CjxyZWN0IHg9IjIxIiB5PSI0NCIgd2lkdGg9IjEwIiBoZWlnaHQ9IjciIHJ4PSIyIiBmaWxsPSIjOEZDNkYwIiBzdHJva2U9Im5vbmUiLz4KPHJlY3QgeD0iMzUiIHk9IjU2IiB3aWR0aD0iMTAiIGhlaWdodD0iNyIgcng9IjIiIGZpbGw9IiM4RkM2RjAiIHN0cm9rZT0ibm9uZSIvPgo8cmVjdCB4PSI0OSIgeT0iNDgiIHdpZHRoPSIxMCIgaGVpZ2h0PSI3IiByeD0iMiIgZmlsbD0iIzhGQzZGMCIgc3Ryb2tlPSJub25lIi8+CjxyZWN0IHg9IjYzIiB5PSI2MCIgd2lkdGg9IjEwIiBoZWlnaHQ9IjciIHJ4PSIyIiBmaWxsPSIjOEZDNkYwIiBzdHJva2U9Im5vbmUiLz4KPC9zdmc+",
+  micstand: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIiB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjOEZDNkYwIiBzdHJva2Utd2lkdGg9IjMiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+CjxwYXRoIGQ9Ik01MCA4NCBWMzQiLz4KPHBhdGggZD0iTTMyIDg0IEw1MCA3MCBMNjggODQiLz4KPHBhdGggZD0iTTUwIDM0IGgyMiIvPgo8Y2lyY2xlIGN4PSI3NiIgY3k9IjM0IiByPSI2Ii8+Cjwvc3ZnPg==",
+  wiredcomm: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIiB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjOEZDNkYwIiBzdHJva2Utd2lkdGg9IjMiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+CjxyZWN0IHg9IjI4IiB5PSIyNiIgd2lkdGg9IjQ0IiBoZWlnaHQ9IjQ0IiByeD0iNiIvPgo8Y2lyY2xlIGN4PSI1MCIgY3k9IjQyIiByPSI3Ii8+CjxwYXRoIGQ9Ik0zOCA1NiBoMjQiLz4KPHBhdGggZD0iTTUwIDcwIHY2IHEwIDggLTEwIDggaC0xNCIvPgo8L3N2Zz4=",
+  other: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIiB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjOEZDNkYwIiBzdHJva2Utd2lkdGg9IjMiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+CjxyZWN0IHg9IjIwIiB5PSIzMCIgd2lkdGg9IjYwIiBoZWlnaHQ9IjQ2IiByeD0iNiIvPgo8cGF0aCBkPSJNMzYgMzAgVjIyIGgyOCB2OCIvPgo8cGF0aCBkPSJNNTAgNDQgdjE4IE00MSA1MyBoMTgiLz4KPC9zdmc+",
+};
+
+// ============================================================================
+// INVENTORY — Audio Booth.
+//
+// Optional flags per item:
+//   pairWith    — after checkout, remind them to also grab this item id
+//   requestOnly — can't be self-served; logs a request instead
+//   warn        — red text on the card, for rules that matter
+//   isOther     — free-text catch-all
+// ============================================================================
+const INVENTORY = {
+  audio: [
+    { id: "rpw120",        name: "Shure RPW120 Wireless Handheld", qty: 4, img: GEAR_IMG.handheld,
+      note: "Take a mic battery with it", pairWith: "mic-batt" },
+    { id: "ref-pack",      name: "ULXT Referee Lav Pack + Ref Headset", qty: 1, img: GEAR_IMG.refpack,
+      note: "Pack and headset stay together", pairWith: "mic-batt" },
+    { id: "cc-beltpack",   name: "Clear-Com Wireless Beltpack", qty: 5, img: GEAR_IMG.beltpack,
+      note: "Take a headset battery with it", pairWith: "hs-batt" },
+    { id: "cc-headset",    name: "Comm Headset", qty: 5, img: GEAR_IMG.headset,
+      note: "Pairs with a wireless beltpack" },
+    { id: "mic-batt",      name: "Mic Battery", qty: 8, img: GEAR_IMG.battery,
+      note: "One per mic or ref pack, every time" },
+    { id: "hs-batt",       name: "Headset Battery", qty: 10, img: GEAR_IMG.battery,
+      note: "One per wireless beltpack, every time" },
+    { id: "audio-console", name: "Audio Console", qty: 1, img: GEAR_IMG.console,
+      note: "Whoever is operating checks this out for their shift" },
+    { id: "mic-stand",     name: "Mic Stand", qty: 3, requestOnly: true, img: GEAR_IMG.micstand,
+      note: "Stored on the mezzanine — request it and it will be brought up",
+      warn: "Do not go down to the mezzanine to get these yourself." },
+    { id: "wired-comm",    name: "Wired Comm Unit", qty: 4, img: GEAR_IMG.wiredcomm, note: "" },
+    { id: "other",         name: "Other Equipment", qty: 1, isOther: true, img: GEAR_IMG.other,
+      note: "Anything else leaving the booth — type what you're taking" },
+  ],
+};
+
+const BOOTH_LABELS = { audio: "Audio Booth" };
+
+let db = null;
+let state = {
+  booth: "audio",
+  person: null,          // { name, uid }
+  crew: [],              // from publicProfiles
+  checkouts: {},         // live: { "<booth>": { "<unitKey>": {...} } }
+  pickerOpen: false,
+  loadingCrew: false,
+  manualName: "",
+};
+
+function escapeHtml(str) {
+  return String(str == null ? "" : str)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function escapeAttr(str) { return escapeHtml(str); }
+
+function toast(msg, warn) {
+  const existing = document.querySelector(".toast");
+  if (existing) existing.remove();
+  const el = document.createElement("div");
+  el.className = "toast" + (warn ? " warn" : "");
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 2600);
+}
+
+// Each physical unit gets a stable key: "beltpack__3" is beltpack #3.
+function unitKey(itemId, n) { return `${itemId}__${n}`; }
+
+function boothCheckouts() { return state.checkouts[state.booth] || {}; }
+
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+function init() {
+  try {
+    if (typeof firebase === "undefined") {
+      document.getElementById("root").innerHTML = `<div class="error-msg">Couldn't load the database library. Check the iPad's internet connection and reload.</div>`;
+      return;
+    }
+    if (!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
+    db = firebase.database();
+  } catch (e) {
+    document.getElementById("root").innerHTML = `<div class="error-msg">Couldn't connect (${escapeHtml(e.message || "unknown error")}).</div>`;
+    return;
+  }
+
+  // Remember who last used this iPad for a short while, so someone checking
+  // out five things doesn't re-tap their name five times. Cleared after 30
+  // minutes of no activity so the next person doesn't inherit it.
+  try {
+    const saved = JSON.parse(sessionStorage.getItem("eqPerson") || "null");
+    if (saved && saved.name && saved.at && (Date.now() - saved.at) < 30 * 60 * 1000) {
+      state.person = { name: saved.name, uid: saved.uid || null };
+    }
+  } catch (e) { /* no saved person, fine */ }
+
+  db.ref("equipmentCheckouts").on("value", (snap) => {
+    state.checkouts = snap.val() || {};
+    render();
+  }, (err) => {
+    console.error(err);
+    document.getElementById("root").innerHTML = `<div class="error-msg">Couldn't read equipment data (${escapeHtml(err.message || "permission denied")}). Check the database rules — see the setup note at the top of this file.</div>`;
+  });
+
+  document.getElementById("whoBtn").onclick = openPersonPicker;
+
+  render();
+}
+
+function rememberPerson() {
+  try {
+    sessionStorage.setItem("eqPerson", JSON.stringify({
+      name: state.person ? state.person.name : null,
+      uid: state.person ? state.person.uid : null,
+      at: Date.now(),
+    }));
+  } catch (e) { /* private browsing, fine */ }
+}
+
+// ---------------------------------------------------------------------------
+// Who's using the iPad
+// ---------------------------------------------------------------------------
+async function openPersonPicker() {
+  state.pickerOpen = true;
+  state.loadingCrew = true;
+  renderPicker();
+  if (state.crew.length === 0) {
+    try {
+      const snap = await db.ref("publicProfiles").once("value");
+      const profiles = snap.val() || {};
+      state.crew = Object.entries(profiles)
+        .filter(([, p]) => p && p.legalName)
+        .map(([uid, p]) => ({ uid, name: p.legalName, handle: p.crewHandle || "" }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    } catch (e) {
+      console.error("Couldn't load crew list:", e);
+      // Not fatal — the type-a-name box still works.
+    }
+  }
+  state.loadingCrew = false;
+  renderPicker();
+}
+
+function renderPicker() {
+  const existing = document.getElementById("pickerOverlay");
+  if (existing) existing.remove();
+  if (!state.pickerOpen) return;
+
+  const overlay = document.createElement("div");
+  overlay.id = "pickerOverlay";
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal-card">
+      <div class="modal-title">Who are you?</div>
+      <div class="modal-sub">This gets attached to anything you check out.</div>
+      ${state.loadingCrew ? `<div class="footnote">Loading crew…</div>` : `
+        <div style="max-height:46vh; overflow-y:auto; margin-bottom:14px;">
+          ${state.crew.length === 0
+            ? `<div class="footnote" style="margin-bottom:12px;">No crew profiles loaded — type your name below.</div>`
+            : state.crew.map((c) => `
+                <button class="name-pick" data-name="${escapeAttr(c.name)}" data-uid="${escapeAttr(c.uid)}">
+                  ${escapeHtml(c.name)}${c.handle ? ` <span style="color:var(--text-faint);">"${escapeHtml(c.handle)}"</span>` : ""}
+                </button>
+              `).join("")}
+        </div>
+        <div class="section-label" style="margin-top:0;">Not listed? Type your name</div>
+        <input id="manualName" placeholder="First and last name" value="${escapeAttr(state.manualName)}" />
+        <div id="pickerError"></div>
+        <div style="display:flex; gap:10px; margin-top:14px;">
+          <button class="btn" id="pickerCancel" style="flex:1;">Cancel</button>
+          <button class="btn btn-primary" id="pickerManual" style="flex:1;">Use This Name</button>
+        </div>
+      `}
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  overlay.querySelectorAll(".name-pick").forEach((btn) => {
+    btn.onclick = () => {
+      state.person = { name: btn.dataset.name, uid: btn.dataset.uid || null };
+      state.pickerOpen = false;
+      rememberPerson();
+      renderPicker();
+      render();
+    };
+  });
+  const manualInput = document.getElementById("manualName");
+  if (manualInput) manualInput.oninput = (e) => { state.manualName = e.target.value; };
+  const manualBtn = document.getElementById("pickerManual");
+  if (manualBtn) {
+    manualBtn.onclick = () => {
+      const name = (state.manualName || "").trim();
+      if (name.length < 2) {
+        document.getElementById("pickerError").innerHTML = `<div class="error-msg">Type your name first, or pick it from the list.</div>`;
+        return;
+      }
+      state.person = { name, uid: null };
+      state.pickerOpen = false;
+      state.manualName = "";
+      rememberPerson();
+      renderPicker();
+      render();
+    };
+  }
+  const cancelBtn = document.getElementById("pickerCancel");
+  if (cancelBtn) cancelBtn.onclick = () => { state.pickerOpen = false; renderPicker(); };
+  overlay.onclick = (e) => { if (e.target === overlay) { state.pickerOpen = false; renderPicker(); } };
+}
+
+// ---------------------------------------------------------------------------
+// Check out / check in
+// ---------------------------------------------------------------------------
+async function checkOut(itemId, unitNum, itemName) {
+  if (!state.person) { openPersonPicker(); return; }
+  const key = unitKey(itemId, unitNum);
+  const path = `equipmentCheckouts/${state.booth}/${key}`;
+  try {
+    // Re-read first: two people can tap the same unit at the same time on
+    // different devices, and last-write-wins would silently overwrite.
+    const snap = await db.ref(path).once("value");
+    if (snap.val()) {
+      toast(`${itemName} #${unitNum} was just taken by someone else.`, true);
+      return;
+    }
+    const entry = {
+      itemId, itemName, unitNum, booth: state.booth,
+      personName: state.person.name, personUid: state.person.uid || null,
+      outAt: new Date().toISOString(),
+    };
+    await db.ref(path).set(entry);
+    await db.ref(`equipmentLog/${state.booth}`).push({ ...entry, action: "out" });
+    toast(`${itemName} #${unitNum} checked out to ${state.person.name}`);
+
+    // Mics and wireless comms are useless without a battery, and forgetting
+    // one is the single easiest mistake to make on the way out the door.
+    const item = (INVENTORY[state.booth] || []).find((i) => i.id === itemId);
+    if (item && item.pairWith) {
+      const partner = (INVENTORY[state.booth] || []).find((i) => i.id === item.pairWith);
+      if (partner) {
+        const partnerOut = Object.values(boothCheckouts())
+          .filter((e) => e.itemId === partner.id && e.personName === state.person.name).length;
+        const mine = Object.values(boothCheckouts())
+          .filter((e) => e.itemId === itemId && e.personName === state.person.name).length;
+        if (partnerOut < mine) {
+          setTimeout(() => toast(`Don't forget a ${partner.name} — tap one below.`, true), 2700);
+        }
+      }
+    }
+  } catch (e) {
+    toast("Couldn't check that out: " + (e.message || "error"), true);
+  }
+}
+
+// Mic stands live on the mezzanine and crew aren't allowed to go get them.
+// This logs a request instead so someone can bring it up.
+async function requestItem(itemId, itemName) {
+  if (!state.person) { openPersonPicker(); return; }
+  try {
+    await db.ref(`equipmentRequests/${state.booth}`).push({
+      itemId, itemName, booth: state.booth,
+      personName: state.person.name, personUid: state.person.uid || null,
+      requestedAt: new Date().toISOString(), fulfilled: false,
+    });
+    toast(`${itemName} requested — someone will bring it up.`);
+  } catch (e) {
+    toast("Couldn't send that request: " + (e.message || "error"), true);
+  }
+}
+
+// Catch-all so nothing walks out unlogged just because it isn't on the list.
+function openOtherModal() {
+  if (!state.person) { openPersonPicker(); return; }
+  const existing = document.getElementById("otherOverlay");
+  if (existing) existing.remove();
+  const overlay = document.createElement("div");
+  overlay.id = "otherOverlay";
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal-card">
+      <div class="modal-title">What are you taking?</div>
+      <div class="modal-sub">Anything leaving the booth that isn't on the list.</div>
+      <input id="otherName" placeholder="e.g. XLR cable, DI box, spare headset" />
+      <div id="otherError"></div>
+      <div style="display:flex; gap:10px; margin-top:14px;">
+        <button class="btn" id="otherCancel" style="flex:1;">Cancel</button>
+        <button class="btn btn-primary" id="otherConfirm" style="flex:1;">Check Out</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  const input = document.getElementById("otherName");
+  if (input) input.focus();
+  document.getElementById("otherCancel").onclick = () => overlay.remove();
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  document.getElementById("otherConfirm").onclick = async () => {
+    const desc = (input.value || "").trim();
+    if (desc.length < 2) {
+      document.getElementById("otherError").innerHTML = `<div class="error-msg">Type what you're taking first.</div>`;
+      return;
+    }
+    // Unique key per free-text item so several can be out at once.
+    const key = `other__${Date.now()}`;
+    try {
+      const entry = {
+        itemId: "other", itemName: desc, unitNum: 1, booth: state.booth,
+        personName: state.person.name, personUid: state.person.uid || null,
+        outAt: new Date().toISOString(), freeText: true,
+      };
+      await db.ref(`equipmentCheckouts/${state.booth}/${key}`).set(entry);
+      await db.ref(`equipmentLog/${state.booth}`).push({ ...entry, action: "out" });
+      overlay.remove();
+      toast(`${desc} checked out to ${state.person.name}`);
+    } catch (e) {
+      document.getElementById("otherError").innerHTML = `<div class="error-msg">Couldn't check that out (${escapeHtml(e.message || "error")}).</div>`;
+    }
+  };
+}
+
+async function checkInByKey(key, itemName, unitLabel) {
+  const path = `equipmentCheckouts/${state.booth}/${key}`;
+  try {
+    const snap = await db.ref(path).once("value");
+    const entry = snap.val();
+    if (!entry) { toast(`${itemName} is already checked in.`, true); return; }
+    await db.ref(path).remove();
+    await db.ref(`equipmentLog/${state.booth}`).push({
+      itemId: entry.itemId, itemName: entry.itemName, unitNum: entry.unitNum || 1, booth: state.booth,
+      personName: entry.personName, personUid: entry.personUid || null,
+      outAt: entry.outAt, inAt: new Date().toISOString(),
+      returnedBy: state.person ? state.person.name : "(not specified)",
+      freeText: !!entry.freeText, action: "in",
+    });
+    toast(`${itemName}${unitLabel || ""} checked back in`);
+  } catch (e) {
+    toast("Couldn't check that in: " + (e.message || "error"), true);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Render
+// ---------------------------------------------------------------------------
+function render() {
+  const whoEl = document.getElementById("whoName");
+  whoEl.textContent = state.person ? state.person.name : "Tap Change to pick your name";
+  whoEl.className = "who-name" + (state.person ? "" : " who-none");
+
+  const out = boothCheckouts();
+  const items = INVENTORY[state.booth] || [];
+  const myOutEntries = Object.entries(out).filter(([, e]) => state.person && e.personName === state.person.name);
+  const totalOut = Object.keys(out).length;
+
+  const fmtWhen = (iso) => {
+    const d = new Date(iso);
+    return isNaN(d) ? "" : d.toLocaleString([], { hour: "numeric", minute: "2-digit", month: "short", day: "numeric" });
+  };
+
+  const root = document.getElementById("root");
+  root.innerHTML = `
+    <div class="footnote">${BOOTH_LABELS[state.booth]} — ${totalOut} item${totalOut === 1 ? "" : "s"} currently out${myOutEntries.length ? `, ${myOutEntries.length} with you` : ""}.</div>
+
+    ${myOutEntries.length ? `
+      <div class="section-label">Checked out to you — tap to return</div>
+      <div class="item-grid">
+        ${myOutEntries.map(([key, e]) => `
+          <button class="item-card mine" data-action="in" data-key="${escapeAttr(key)}" data-name="${escapeAttr(e.itemName)}" data-unitlabel="${e.freeText ? "" : ` #${e.unitNum}`}">
+            <div class="item-name">${escapeHtml(e.itemName)}${e.freeText ? "" : ` #${e.unitNum}`}</div>
+            <div class="item-meta">Out since ${fmtWhen(e.outAt)}</div>
+            <div class="item-status status-mine">Tap to check in</div>
+          </button>
+        `).join("")}
+      </div>
+    ` : ""}
+
+    ${items.map((item) => {
+      // Free-text catch-all: one button, opens a "what are you taking?" box.
+      if (item.isOther) {
+        return `
+          <div class="gear-head">
+            ${item.img ? `<img class="gear-img" src="${item.img}" alt="" />` : ""}
+            <div>
+              <div class="gear-title">${escapeHtml(item.name)}</div>
+              <div class="gear-sub">${escapeHtml(item.note || "")}</div>
+            </div>
+          </div>
+          <div class="item-grid">
+            <button class="item-card" data-action="other">
+              ${item.img ? `<img class="card-img" src="${item.img}" alt="" />` : ""}
+              <div class="item-name">+ Check out something else</div>
+              <div class="item-meta">Type what you're taking</div>
+              <div class="item-status status-in">Tap to log it</div>
+            </button>
+          </div>
+        `;
+      }
+
+      if (item.requestOnly) {
+        return `
+          <div class="gear-head">
+            ${item.img ? `<img class="gear-img" src="${item.img}" alt="" />` : ""}
+            <div>
+              <div class="gear-title">${escapeHtml(item.name)}</div>
+              <div class="gear-sub">${item.qty} available${item.note ? ` · ${escapeHtml(item.note)}` : ""}</div>
+            </div>
+          </div>
+          ${item.warn ? `<div class="error-msg" style="margin-top:0; margin-bottom:10px;">${escapeHtml(item.warn)}</div>` : ""}
+          <div class="item-grid">
+            <button class="item-card" data-action="request" data-item="${escapeAttr(item.id)}" data-name="${escapeAttr(item.name)}">
+              ${item.img ? `<img class="card-img" src="${item.img}" alt="" />` : ""}
+              <div class="item-name">Request a ${escapeHtml(item.name)}</div>
+              <div class="item-meta">It'll be brought up to you</div>
+              <div class="item-status status-in">Tap to request</div>
+            </button>
+          </div>
+        `;
+      }
+
+      const units = [];
+      for (let n = 1; n <= item.qty; n++) {
+        const key = unitKey(item.id, n);
+        const entry = out[key];
+        const isMine = entry && state.person && entry.personName === state.person.name;
+        units.push({ n, key, entry, isMine });
+      }
+      const availableCount = units.filter((u) => !u.entry).length;
+      return `
+        <div class="gear-head">
+          ${item.img ? `<img class="gear-img" src="${item.img}" alt="" />` : ""}
+          <div>
+            <div class="gear-title">${escapeHtml(item.name)}</div>
+            <div class="gear-sub">${availableCount} of ${item.qty} available${item.note ? ` · ${escapeHtml(item.note)}` : ""}</div>
+          </div>
+        </div>
+        <div class="item-grid">
+          ${units.map((u) => {
+            if (!u.entry) {
+              return `
+                <button class="item-card" data-action="out" data-item="${escapeAttr(item.id)}" data-unit="${u.n}" data-name="${escapeAttr(item.name)}">
+                  ${item.img ? `<img class="card-img" src="${item.img}" alt="" />` : ""}
+                  <div class="item-name">${escapeHtml(item.name)} #${u.n}</div>
+                  <div class="item-meta">Available</div>
+                  <div class="item-status status-in">Tap to check out</div>
+                </button>
+              `;
+            }
+            if (u.isMine) {
+              return `
+                <button class="item-card mine" data-action="in" data-key="${escapeAttr(u.key)}" data-name="${escapeAttr(item.name)}" data-unitlabel=" #${u.n}">
+                  ${item.img ? `<img class="card-img" src="${item.img}" alt="" />` : ""}
+                  <div class="item-name">${escapeHtml(item.name)} #${u.n}</div>
+                  <div class="item-meta">You have this</div>
+                  <div class="item-status status-mine">Tap to check in</div>
+                </button>
+              `;
+            }
+            return `
+              <div class="item-card out">
+                ${item.img ? `<img class="card-img" src="${item.img}" alt="" />` : ""}
+                <div class="item-name">${escapeHtml(item.name)} #${u.n}</div>
+                <div class="item-meta">${escapeHtml(u.entry.personName)}<br />since ${fmtWhen(u.entry.outAt)}</div>
+                <div class="item-status status-out">Checked out</div>
+                <div style="margin-top:9px;">
+                  <button class="btn" style="padding:7px 12px; font-size:12.5px;" data-action="in" data-key="${escapeAttr(u.key)}" data-name="${escapeAttr(item.name)}" data-unitlabel=" #${u.n}">Return for them</button>
+                </div>
+              </div>
+            `;
+          }).join("")}
+        </div>
+      `;
+    }).join("")}
+  `;
+
+  root.querySelectorAll("[data-action]").forEach((el) => {
+    el.onclick = (ev) => {
+      ev.stopPropagation();
+      const { action, item, unit, name, key, unitlabel } = el.dataset;
+      if (action === "out") checkOut(item, Number(unit), name);
+      else if (action === "in") checkInByKey(key, name, unitlabel || "");
+      else if (action === "request") requestItem(item, name);
+      else if (action === "other") openOtherModal();
+    };
+  });
+}
+
+init();
+</script>
+</body>
+</html>
